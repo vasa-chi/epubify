@@ -1,3 +1,4 @@
 .idea
-.pyc
-.pyo
+*.pyc
+*.pyo
+.DS_Store
