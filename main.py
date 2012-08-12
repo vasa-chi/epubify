@@ -9,6 +9,7 @@ import wikimarkup
 import epub
 import tempfile
 import os
+from mwclient import page as mwpage
 
 def one_time(func):
   arguments = dict()
@@ -92,17 +93,22 @@ def export_book(site, page, cover=None):
 
   @one_time
   def download_image(image):
-    print('Downloading image {0}'.format(image))
-    i = site.Images[image]
-    _, path = tempfile.mkstemp()
-    with open(path, 'wb') as out:
-      shutil.copyfileobj(i.download(), out)
-    print('Finished downloading image {0}'.format(image))
-    return path, image
+    try:
+      print('Downloading image {0}'.format(image))
+      i = site.Images[image]
+      _, path = tempfile.mkstemp()
+      with open(path, 'wb') as out:
+        shutil.copyfileobj(i.download(), out)
+      print('Finished downloading image {0}'.format(image))
+      return path, image
+    except urllib2.URLError:
+      print('ERROR! retrying...')
+      return download_image(image)
 
   def put_images(page_text):
     def replace_image(match):
       image = match.group(1)
+      image = mwpage.Page.normalize_title(image)
       image_jobs.append(gevent.spawn(download_image, image))
       return '<img src="{0}" alt="{0}"/>'.format(image)
 
@@ -116,6 +122,25 @@ def export_book(site, page, cover=None):
 
     return page, markup
 
+  def save_illustrations_page(page):
+    def insert_images(markup):
+      def replace_image(match):
+        image = match.group(1)
+        image = mwpage.Page.normalize_title(image)
+        image_jobs.append(gevent.spawn(download_image, image))
+        return '<img src={0} alt="{0}/>'.format(image)
+
+      images = re.compile(r'Image\:(.+?)(?:\n|\|.+)', re.IGNORECASE)
+      markup = re.sub(images, replace_image, markup)
+      return markup
+
+    markup = wikimarkup.parse(page.edit().encode('utf-8'), showToc=False)
+    markup = clean_page(markup)
+    markup = re.sub(r'&lt;gallery&gt;', '', markup)
+    markup = re.sub(r'&lt;/gallery&gt;', '', markup)
+    markup = insert_images(markup)
+    return page, markup
+
   if cover:
     image_jobs.append(gevent.spawn(download_image, cover))
 
@@ -127,7 +152,9 @@ def export_book(site, page, cover=None):
   jobs = [gevent.spawn(get_page, site, p) for p in toc]
   gevent.joinall(jobs)
 
-  pages = [gevent.spawn(save_page, book_page) for book_page in (job.value for job in jobs[1:])]
+  pages = [gevent.spawn(save_illustrations_page, jobs[0].value)]
+  pages.extend([gevent.spawn(save_page, book_page) for book_page in (job.value for job in jobs[1:])])
+
   gevent.joinall(pages)
   gevent.joinall(image_jobs)
 
@@ -141,13 +168,13 @@ def export_book(site, page, cover=None):
   if cover:
     book.addCover(cover)
 
+  image_list = set(image_list)
   for path, img in image_list:
     book.addImage(path, img)
 
   for book_page, markup in (book_page.value for book_page in pages):
     element = book.addHtml('', book_page.name + '.html', markup)
     book.addSpineItem(element)
-
 
   book_dir = tempfile.mkdtemp()
   book.createBook(book_dir)
